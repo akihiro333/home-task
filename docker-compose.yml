@@ -1,0 +1,122 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: taskmanager
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    build:
+      context: ./backend
+      target: development
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/taskmanager
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+    command: alembic upgrade head
+    volumes:
+      - ./backend:/app
+
+  seed:
+    build:
+      context: ./backend
+      target: development
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/taskmanager
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: python seed.py
+    volumes:
+      - ./backend:/app
+
+  api:
+    build:
+      context: ./backend
+      target: development
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/taskmanager
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: dev-secret-key
+      JWT_ISSUER: taskmanager
+      PUBLIC_URL: http://localhost:3000
+      TENANT_SUBDOMAIN_BASE: example.local
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+    volumes:
+      - ./backend:/app
+      - exports_data:/app/exports
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker:
+    build:
+      context: ./backend
+      target: development
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/taskmanager
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: dev-secret-key
+      JWT_ISSUER: taskmanager
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.celery worker --loglevel=info
+    volumes:
+      - ./backend:/app
+      - exports_data:/app/exports
+
+  web:
+    build:
+      context: ./frontend
+      target: development
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+volumes:
+  postgres_data:
+  exports_data:
